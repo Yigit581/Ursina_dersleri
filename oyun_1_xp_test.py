@@ -1,8 +1,33 @@
 from ursina import *
 import math, random
 from ursina.shaders import basic_lighting_shader
+
 Entity.default_shader = basic_lighting_shader
 
+# ----------------------------- XP KÜRESİ SINIFI (YENİ) -----------------------------
+class XPOrb(Entity):
+    def __init__(self, position, amount=5):
+        super().__init__(
+            model='sphere',
+            color=color.yellow, # XP genelde sarı/altın rengi olur
+            scale=0.3,
+            position=position + Vec3(0, 0.5, 0), # Yerden biraz yukarıda doğsun
+            collider='box',
+            shader=basic_lighting_shader
+        )
+        self.amount = amount
+        # Doğduğunda hafifçe zıplama efekti
+        self.animate_y(self.y + 0.5, duration=0.5, curve=curve.out_bounce)
+
+    def update(self):
+        # Kendi etrafında dönsün
+        self.rotation_y += 100 * time.dt
+        
+        # Oyuncuya yakınsa (Toplama mantığı)
+        if distance(self, player) < 1.5:
+            player.add_xp(self.amount)
+            print(f"XP Toplandı: {self.amount}")
+            destroy(self)
 
 # ----------------------------- PLAYER SINIFI -----------------------------
 class Player(Entity):
@@ -16,7 +41,7 @@ class Player(Entity):
         self.level = 1
         self.xp_needed = 10
         self.attack_cooldown = 0
-        self.weapon = "sword"  # 🔥 Yeni: kılıç veya yay
+        self.weapon = "sword"
 
         # Kılıç modeli
         self.sword = Entity(parent=self, model='sword', color=color.gray, scale=0.1,
@@ -62,7 +87,7 @@ class Player(Entity):
         camera.look_at(self.position)
 
         # Silah değiştirme
-        if held_keys['q']:  # 🔥 Yeni: silah değiştir
+        if held_keys['q']:
             self.switch_weapon()
 
         # Saldırı
@@ -76,7 +101,6 @@ class Player(Entity):
             self.attack_cooldown = 0.5
 
     def switch_weapon(self):
-        # 🔥 Yeni: Silah değiştirme (Kılıç ↔ Yay)
         if self.weapon == "sword":
             self.weapon = "bow"
             self.sword.visible = False
@@ -85,10 +109,8 @@ class Player(Entity):
             self.weapon = "sword"
             self.sword.visible = True
             self.bow.visible = False
-        print(f"Silah değiştirildi: {self.weapon}")
 
     def sword_attack(self):
-        print("Kılıç saldırısı!")
         self.show_attack_area()
         for e in scene.entities:
             if isinstance(e, Enemy):
@@ -101,8 +123,6 @@ class Player(Entity):
                         e.take_damage(self.attack_power)
 
     def bow_attack(self):
-        # 🏹 Yay saldırısı (uzaktan ok atma)
-        print("Yay ile atış yapıldı!")
         arrow = Entity(model='cube', color=color.orange, scale=(0.1,0.1,0.5),
                        position=self.position + self.forward, rotation_y=self.rotation_y)
         arrow.direction = self.forward
@@ -129,6 +149,7 @@ class Player(Entity):
 
     def add_xp(self, amount):
         self.xp += amount
+        # XP barı veya görseli varsa burada güncellenebilir
         if self.xp >= self.xp_needed:
             self.level_up()
 
@@ -157,14 +178,15 @@ class Enemy(Entity):
         if mod in ["menu", "game over"]: return
         direction = (self.player.position - self.position).normalized()
         self.position += direction * self.speed * time.dt
-        if distance(self,player) < 1:
+        if distance(self, player) < 1:
             self.sword_attack()
 
     def take_damage(self, dmg):
         self.hp -= dmg
         if self.hp <= 0:
+            # 🔥 YENİ: Öldüğünde XP küresi düşür
+            XPOrb(position=self.position, amount=5) 
             destroy(self)
-            self.player.add_xp(5)
         else:
             self.update_health_bar()
 
@@ -275,7 +297,7 @@ quests = [
     Quest("Efsanevi Silahı Al", "Yeni yayı elde et.", (0,0,-25), reward_weapon=True)
 ]
 
-quest_text = Text(text="Görev Yok", origin=(-.5,.5), scale=1.2, position=(-0.85,0.45), color=color.yellow)  # 🔥 Sol üstte görev yazısı
+quest_text = Text(text="Görev Yok", origin=(-.5,.5), scale=1.2, position=(-0.85,0.45), color=color.yellow)
 
 
 # ----------------------------- UPDATE FONKSİYONU -----------------------------
