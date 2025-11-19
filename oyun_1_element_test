@@ -1,0 +1,438 @@
+from ursina import *
+import math, random
+from ursina.shaders import basic_lighting_shader
+
+Entity.default_shader = basic_lighting_shader
+
+# ----------------------------- XP KÜRESİ -----------------------------
+class XPOrb(Entity):
+    def __init__(self, position, amount=5):
+        super().__init__(
+            model='cube', color=color.yellow, scale=0.3,
+            position=position + Vec3(0, 0.5, 0), collider='box',
+            shader=basic_lighting_shader
+        )
+        self.amount = amount
+        self.animate_y(self.y + 0.5, duration=0.5, curve=curve.out_bounce)
+
+    def update(self):
+        self.rotation_y += 100 * time.dt
+        if distance(self, player) < 1.5:
+            player.add_xp(self.amount)
+            destroy(self)
+
+# ----------------------------- PLAYER SINIFI -----------------------------
+class Player(Entity):
+    def __init__(self):
+        super().__init__(model='cube', color=color.azure, scale=(1,1,1), collider='box')
+        
+        # Temel Statlar
+        self.base_speed = 5  # Normal hız (Rüzgar buff'ı hariç)
+        self.speed = self.base_speed
+        self.attack_power = 1
+        self.max_hp = 10
+        self.hp = 10
+        
+        # Level Sistemi
+        self.xp = 0
+        self.level = 1
+        self.xp_needed = 10
+        
+        # Element Seviyeleri (0 = yok)
+        self.fire_level = 0
+        self.wind_level = 0
+        self.mud_level = 0
+        
+        # Buff Durumları
+        self.wind_buff_timer = 0 # Hız artışı süresi
+        
+        self.attack_cooldown = 0
+        self.weapon = "sword"
+
+        # Modeller
+        self.sword = Entity(parent=self, model='sword', color=color.gray, scale=0.1,
+                            position=(0,0.3,1), rotation_y = 180)
+        self.bow = Entity(parent=self, model='cube', color=color.yellow, scale=(0.05,0.3,0.1),
+                          position=(0.3,0.3,1), visible=False)
+
+        # UI
+        self.attack_area = Entity(parent=self, model=Mesh(vertices=[], mode='triangle', thickness=2),
+                                  color=color.rgba(255,0,0,0.5), visible=False, shader=None)
+        self.health_bg = Entity(parent=self, model='quad', color=color.rgb(100,0,0),
+                                scale=(1, 0.1, 1), position=(0, 0.6, 0), billboard=True, shader=None)
+        self.health_fg = Entity(parent=self.health_bg, model='quad', color=color.green,
+                                scale=(1, 1, 1), position=(0,0,-0.5), shader=None)
+
+    def update_health_bar(self):
+        ratio = max(self.hp / self.max_hp, 0)
+        self.health_fg.scale_x = ratio
+        self.health_fg.x = -(1 - ratio) / 2
+        self.health_fg.color = color.rgb(255*(1-ratio), 255*ratio, 0)
+
+    def take_damage_p(self, dmg):
+        global mod
+        self.hp -= dmg
+        if self.hp <= 0:
+            mod = "game over"
+        else:
+            self.update_health_bar()
+
+    def update(self):
+        if mod in ["menu", "game over"]: return
+
+        # Rüzgar Efekti Mantığı (Hız Buffı)
+        if self.wind_buff_timer > 0:
+            self.wind_buff_timer -= time.dt
+            self.speed = self.base_speed + 10 # Rüzgar aktifken +10 hız
+        else:
+            self.speed = self.base_speed
+
+        # Hareket
+        move = (held_keys['d'] - held_keys['a'], 0, held_keys['w'] - held_keys['s'])
+        if move != (0,0,0):
+            self.rotation_y = math.degrees(math.atan2(move[0], move[2]))
+        self.position += Vec3(*move) * time.dt * self.speed
+        camera.position = self.position + Vec3(0, 15, -15)
+        camera.look_at(self.position)
+
+        # Silah Değiştirme
+        if held_keys['q']: self.switch_weapon()
+
+        # Saldırı
+        if self.attack_cooldown > 0: self.attack_cooldown -= time.dt
+        if mouse.left and self.attack_cooldown <= 0:
+            if self.weapon == "sword": self.sword_attack()
+            elif self.weapon == "bow": self.bow_attack()
+            self.attack_cooldown = 0.5
+
+    def switch_weapon(self):
+        if self.weapon == "sword":
+            self.weapon = "bow"
+            self.sword.visible = False; self.bow.visible = True
+        else:
+            self.weapon = "sword"
+            self.sword.visible = True; self.bow.visible = False
+
+    # 🔥 ELEMENT VE STATÜ ETKİLERİNİ UYGULA
+    def apply_on_hit_effects(self, target_enemy):
+        # 1. Rüzgar: Oyuncuya hız ver
+        if self.wind_level > 0:
+            self.wind_buff_timer = 3.0 # 3 saniye
+            # Efekt (Görsel)
+            if not hasattr(self, 'wind_fx'):
+                self.wind_fx = Entity(parent=self, model='sphere', color=color.rgba(200,255,255,0.5), scale=1.5)
+                invoke(destroy, self.wind_fx, delay=0.2)
+
+        # 2. Alev: Düşmanı yak
+        if self.fire_level > 0:
+            burn_dmg = 0.5 * self.fire_level # Seviye başına hasar artar
+            target_enemy.ignite(burn_dmg, duration=3.0)
+
+        # 3. Çamur: Düşmanı yavaşlat
+        if self.mud_level > 0:
+            target_enemy.apply_slow(factor=0.5, duration=3.0) # %50 yavaşlatma
+
+    def sword_attack(self):
+        self.show_attack_area()
+        hit_something = False
+        for e in scene.entities:
+            if isinstance(e, Enemy):
+                dir_to_enemy = e.position - self.position
+                if dir_to_enemy.length() <= 2:
+                    angle = math.degrees(math.acos(self.forward.normalized().dot(dir_to_enemy.normalized())))
+                    if angle <= 90:
+                        e.take_damage(self.attack_power)
+                        self.apply_on_hit_effects(e) # Efektleri uygula
+                        hit_something = True
+        
+        if hit_something and self.wind_level > 0:
+             # Kılıçla vurunca rüzgar sesi/efekti olabilir
+             pass
+
+    def bow_attack(self):
+        arrow = Entity(model='cube', color=color.orange, scale=(0.1,0.1,0.5),
+                       position=self.position + self.forward, rotation_y=self.rotation_y)
+        arrow.direction = self.forward
+        arrow.speed = 10
+        arrow.life_time = 2
+        arrow.is_arrow = True
+        invoke(destroy, arrow, delay=arrow.life_time)
+        # Okun rengi elemente göre değişsin
+        if self.fire_level > 0: arrow.color = color.red
+        elif self.mud_level > 0: arrow.color = color.brown
+        elif self.wind_level > 0: arrow.color = color.cyan
+
+    def show_attack_area(self):
+        # Görsel efekt rengi elemente göre değişsin
+        c = color.rgba(255,0,0,0.5)
+        if self.fire_level > max(self.wind_level, self.mud_level): c = color.rgba(255,100,0,0.5)
+        if self.wind_level > max(self.fire_level, self.mud_level): c = color.rgba(200,255,255,0.5)
+        if self.mud_level > max(self.fire_level, self.wind_level): c = color.rgba(139,69,19,0.5)
+
+        self.attack_area.color = c
+        radius = 2; segments = 20; vertices = [(0,0,0)]
+        for i in range(segments+1):
+            angle_rad = math.radians(90 - (i * 180/segments))
+            vertices.append((math.sin(angle_rad)*radius, 0.5, math.cos(angle_rad)*radius))
+        self.attack_area.model = Mesh(vertices=vertices, triangles=[(0,i,i+1) for i in range(1, len(vertices)-1)], mode='triangle')
+        self.attack_area.visible = True
+        invoke(self.hide_attack_area, delay=0.2)
+
+    def hide_attack_area(self):
+        self.attack_area.visible = False
+
+    def add_xp(self, amount):
+        self.xp += amount
+        if self.xp >= self.xp_needed:
+            self.level_up()
+
+    def level_up(self):
+        self.level += 1
+        self.xp = 0
+        self.xp_needed = int(self.xp_needed * 1.2) + 5
+        
+        # ⚡ OTOMATİK STAT ARTIŞI (%10)
+        self.attack_power *= 1.1
+        self.base_speed *= 1.1
+        self.max_hp *= 1.1
+        self.hp = self.max_hp # Canı fulle
+        
+        print(f"Seviye {self.level}! Statlar %10 arttı.")
+        show_levelup_menu()
+
+# ----------------------------- DÜŞMAN SINIFI -----------------------------
+class Enemy(Entity):
+    def __init__(self, player):
+        super().__init__(model='cube', color=color.red, scale=0.8, collider='box')
+        self.player = player
+        self.base_speed = 2
+        self.current_speed = self.base_speed
+        self.max_hp = 3 + (player.level * 0.5) # Düşmanlar da güçlensin
+        self.hp = self.max_hp
+        self.attack_power = 0.1 + (player.level * 0.05)
+        
+        # Statü Efektleri
+        self.burn_timer = 0
+        self.burn_damage = 0
+        self.slow_timer = 0
+        
+        # UI
+        self.health_bg = Entity(parent=self, model='quad', color=color.rgb(100,0,0),
+                                scale=(1,0.1,1), position=(0,0.6,0), billboard=True)
+        self.health_fg = Entity(parent=self.health_bg, model='quad', color=color.green,
+                                scale=(1,1,1), position=(0,0,-0.5))
+
+    def update(self):
+        if mod in ["menu", "game over"]: return
+
+        # --- 🔥 YANMA EFEKTİ (DoT) ---
+        if self.burn_timer > 0:
+            self.burn_timer -= time.dt
+            self.take_damage(self.burn_damage * time.dt, is_dot=True)
+            self.color = color.orange # Yanarken turuncu ol
+        else:
+            if self.slow_timer <= 0: self.color = color.red # Normale dön
+
+        # --- 🟤 YAVAŞLAMA EFEKTİ ---
+        if self.slow_timer > 0:
+            self.slow_timer -= time.dt
+            self.color = color.brown # Yavaşken kahverengi
+        else:
+            self.current_speed = self.base_speed # Hızı normale döndür
+
+        # Hareket
+        if self:
+            direction = (self.player.position - self.position).normalized()
+            self.position += direction * self.current_speed * time.dt
+        
+            if distance(self, player) < 1:
+                self.sword_attack()
+
+    def ignite(self, dmg_per_sec, duration):
+        self.burn_timer = duration
+        self.burn_damage = dmg_per_sec
+        
+    def apply_slow(self, factor, duration):
+        self.slow_timer = duration
+        self.current_speed = self.base_speed * factor
+
+    def take_damage(self, dmg, is_dot=False):
+        self.hp -= dmg
+        if self.hp <= 0:
+            XPOrb(position=self.position, amount=5 + player.level)
+            destroy(self)
+        else:
+            self.update_health_bar()
+            # Vurulma efekti (titreme)
+            if not is_dot:
+                self.shake(duration=0.1, magnitude=0.1)
+
+    def update_health_bar(self):
+        ratio = max(self.hp / self.max_hp, 0)
+        self.health_fg.scale_x = ratio
+        self.health_fg.x = -(1 - ratio) / 2
+        self.health_fg.color = color.rgb(255*(1-ratio), 255*ratio, 0)
+
+    def sword_attack(self):
+        if player.hp > 0:
+            if distance(self, player) <= 1.5:
+                 player.take_damage_p(self.attack_power)
+
+# ----------------------------- GÖREV SİSTEMİ -----------------------------
+class Quest:
+    number = 0
+    def __init__(self, title, desc, pos, marker = None, reward_weapon=False):
+        self.title = title; self.desc = desc; self.pos = Vec3(*pos)
+        self.active = False; self.done = False; self.reward_weapon = reward_weapon
+        self.marker = marker
+        if self.marker == None:
+             self.marker = Entity(model='cube', color=color.azure, scale=0.5, position=self.pos, shader=None)
+        elif self.marker == 1:
+             self.marker = Entity(model= "Campfire", scale = 1, shader =None, position= self.pos)
+
+    def update(self):
+        if self.done: return
+        if distance(player, self.marker) < 2 and not self.active and self.title == quests[Quest.number].title:
+            Quest.number += 1% len(quests)
+            self.active = True
+        quest_text.text = f"GÖREV AKTİF: {quests[Quest.number].title}"
+        if self.active and distance(player, self.marker) < 1:
+            self.complete()
+
+    def complete(self):
+        self.done = True; self.active = False; destroy(self.marker)
+        quest_text.text = f"✔ GÖREV TAMAMLANDI: {self.title}"
+        if self.reward_weapon:
+            player.weapon = "bow"; player.sword.visible = False; player.bow.visible = True
+
+def spawn_enemy():
+    e = Enemy(player)
+    angle = random.uniform(0, 360)
+    radius = random.uniform(5, 15)
+    x = player.x + math.sin(angle) * radius
+    z = player.z + math.cos(angle) * radius
+    e.position = Vec3(x, 0, z)
+
+# ----------------------------- YENİ LEVEL UP MENÜSÜ (RNG) -----------------------------
+def show_levelup_menu():
+    global menu_entities, mod
+    mod = "menu"
+    menu_entities = []
+
+    # Arka plan
+    bg = Entity(parent=camera.ui, model='quad', scale=(1, 1), color=color.rgba(0,0,0,0.8))
+    menu_entities.append(bg)
+
+    title = Text(text=f"SEVIYE {player.level} ATLADIN!", scale=2, origin=(0,0), position=(0,0.3), color=color.gold)
+    menu_entities.append(title)
+    
+    info = Text(text="Otomatik: Can, Hız ve Saldırı %10 Arttı.\nBir yetenek seç:", origin=(0,0), position=(0,0.2))
+    menu_entities.append(info)
+
+    # --- ÖZELLİK HAVUZU ---
+    # Her özellik için (Başlık, Açıklama, Fonksiyon)
+    perk_pool = [
+        {
+            "name": "🔥 ALEV KILICI",
+            "desc": f"Düşmanları yakar.\nŞu anki Seviye: {player.fire_level} -> {player.fire_level+1}",
+            "func": lambda: upgrade_element("fire"),
+            "color": color.orange
+        },
+        {
+            "name": "💨 RÜZGAR ADIMLARI",
+            "desc": f"Vurunca 3sn hızlanırsın.\nŞu anki Seviye: {player.wind_level} -> {player.wind_level+1}",
+            "func": lambda: upgrade_element("wind"),
+            "color": color.cyan
+        },
+        {
+            "name": "🟤 ÇAMUR TUZAĞI",
+            "desc": f"Düşmanları yavaşlatır.\nŞu anki Seviye: {player.mud_level} -> {player.mud_level+1}",
+            "func": lambda: upgrade_element("mud"),
+            "color": color.brown
+        },
+        # İleride buraya "Yıldırım", "Buz" vb. ekleyebilirsin.
+        # Şimdilik havuzda 3 tane olduğu için hepsi çıkacak ama sıralama değişebilir.
+    ]
+
+    # Havuzdan rastgele 3 tanesini seç (Şu an 3 tane var zaten)
+    selected_perks = random.sample(perk_pool, k=min(3, len(perk_pool)))
+
+    x_start = -0.5
+    for i, perk in enumerate(selected_perks):
+        # Buton
+        btn = Button(parent=camera.ui, text=perk["name"], color=perk["color"],
+                     scale=(0.25, 0.15), position=(x_start + (i * 0.5), -0.1))
+        btn.on_click = perk["func"]
+        menu_entities.append(btn)
+        
+        # Açıklama yazısı
+        desc = Text(parent=camera.ui, text=perk["desc"], scale=0.8, origin=(0,0),
+                    position=(x_start + (i * 0.5), -0.25), wordwrap=15)
+        menu_entities.append(desc)
+
+def upgrade_element(element):
+    global mod
+    if element == "fire":
+        player.fire_level += 1
+        print("Alev Seviyesi Arttı!")
+        player.sword.color = color.red
+    elif element == "wind":
+        player.wind_level += 1
+        print("Rüzgar Seviyesi Arttı!")
+        player.sword.color = color.cyan
+    elif element == "mud":
+        player.mud_level += 1
+        print("Çamur Seviyesi Arttı!")
+        player.sword.color = color.brown
+        
+    for e in menu_entities: destroy(e)
+    mod = "oyun"
+
+
+# ----------------------------- ANA AYARLAR -----------------------------
+app = Ursina()
+ground = Entity(model='plane', scale=100, texture='grass', collider='box', shader=None)
+player = Player()
+camera.rotation_x = 45
+
+enemy_spawn_timer = 0
+menu_entities = []
+mod = "oyun"
+game_over_text = Text("GAME OVER", scale=2, visible=False, color=color.red)
+
+quests = [
+    Quest("Kamp Alanına Git", "Kamp alanını bul.", (15,0.5,0), marker= 1),
+    Quest("Ormanı Keşfet", "Ormanın girişine ulaş.", (-15,0,20)),
+    Quest("Gizli Tapınağı Bul", "Tapınağın kapısına git.", (0,0,-18)),
+    Quest("Efsanevi Silahı Al", "Yeni yayı elde et.", (0,0,-25), reward_weapon=True)
+]
+
+quest_text = Text(text="Görev Yok", origin=(-.5,.5), scale=1.2, position=(-0.85,0.45), color=color.yellow)
+
+# ----------------------------- UPDATE -----------------------------
+def update():
+    global enemy_spawn_timer
+    if mod == "menu": return
+    if mod == "game over":
+        game_over_text.visible = True
+        return
+
+    for q in quests: q.update()
+
+    # Ok (arrow) çarpışma kontrolü
+    for e in scene.entities:
+        if hasattr(e, 'is_arrow') and e.is_arrow:
+            e.position += e.direction * e.speed * time.dt
+            for en in scene.entities:
+                if isinstance(en, Enemy) and distance(e, en) < 1:
+                    en.take_damage(player.attack_power * 3)
+                    player.apply_on_hit_effects(en) # 🔥 Ok vurunca da efekt uygula
+                    destroy(e)
+                    break
+
+    enemy_spawn_timer += time.dt
+    if enemy_spawn_timer > 3: # Spawn süresini biraz arttırdım
+        spawn_enemy()
+        enemy_spawn_timer = 0
+
+app.run()
