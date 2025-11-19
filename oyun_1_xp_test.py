@@ -8,7 +8,7 @@ Entity.default_shader = basic_lighting_shader
 class XPOrb(Entity):
     def __init__(self, position, amount=5):
         super().__init__(
-            model='sphere',
+            model='cube',
             color=color.yellow, # XP genelde sarı/altın rengi olur
             scale=0.3,
             position=position + Vec3(0, 0.5, 0), # Yerden biraz yukarıda doğsun
